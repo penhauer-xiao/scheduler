@@ -16,10 +16,13 @@ package scheduler
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Pallinder/go-randomdata"
 )
 
 type scheduled interface {
@@ -38,9 +41,11 @@ type Job struct {
 }
 
 type recurrent struct {
-	units  int
-	period time.Duration
-	done   bool
+	units    int
+	period   time.Duration
+	done     bool
+	minTimes int
+	maxTimes int
 }
 
 func (r *recurrent) nextRun() (time.Duration, error) {
@@ -51,13 +56,24 @@ func (r *recurrent) nextRun() (time.Duration, error) {
 		r.done = true
 		return 0, nil
 	}
+
+	if r.minTimes > 0 && r.maxTimes > 0 {
+		v := int(time.Duration(randomdata.Number(r.minTimes, r.maxTimes)))
+		return time.Duration(v) * r.period, nil
+	}
 	return time.Duration(r.units) * r.period, nil
 }
 
 type daily struct {
-	hour int
-	min  int
-	sec  int
+	hour        int
+	min         int
+	sec         int
+	randMinDay  int
+	randMaxDay  int
+	startTime   string
+	endTime     string
+	minInterval int
+	maxInterval int
 }
 
 func (d *daily) setTime(h, m, s int) {
@@ -69,11 +85,48 @@ func (d *daily) setTime(h, m, s int) {
 func (d daily) nextRun() (time.Duration, error) {
 	now := time.Now()
 	year, month, day := now.Date()
-	date := time.Date(year, month, day, d.hour, d.min, d.sec, 0, time.Local)
-	if now.Before(date) {
+
+	if d.startTime == "" {
+		date := time.Date(year, month, day, d.hour, d.min, d.sec, 0, time.Local)
+		if now.Before(date) { // 现在时间还没到你设的时间，那等就是了
+			return date.Sub(now), nil
+		}
+
+		// 现在时间已经过了，你设的时间，则将时间更新到明天
+		date = time.Date(year, month, day+1, d.hour, d.min, d.sec, 0, time.Local)
 		return date.Sub(now), nil
 	}
-	date = time.Date(year, month, day+1, d.hour, d.min, d.sec, 0, time.Local)
+
+	hour1, min1, sec1, err := parseTime(d.startTime)
+	if err != nil {
+		return 0, err
+	}
+	date1 := time.Date(year, month, day, hour1, min1, sec1, 0, time.Local)
+	if now.Before(date1) { // 现在时间还没到你设的时间，那等就是了
+		return date1.Sub(now), nil
+	}
+
+	hour2, min2, sec2, err := parseTime(d.endTime)
+	if err != nil {
+		return 0, err
+	}
+	date2 := time.Date(year, month, day, hour2, min2, sec2, 0, time.Local)
+	if now.After(date2) { // 现在时间已经过了你设定最晚时间，设到下一个随机天的开始时间就是了
+		days := 1
+		if d.randMinDay > 0 && d.randMaxDay > 0 {
+			days = int(time.Duration(randomdata.Number(d.randMinDay, d.randMaxDay)))
+		}
+
+		date2 = time.Date(year, month, day+days, hour1, min1, sec1, 0, time.Local)
+		return date2.Sub(now), nil
+	}
+
+	// 时间范围内，则按随机范围内等就是了
+	seconds := 0
+	if d.minInterval > 0 {
+		seconds = int(time.Duration(randomdata.Number(d.minInterval, d.maxInterval)))
+	}
+	date := time.Date(year, month, day, now.Hour(), now.Minute(), now.Second()+seconds, 0, time.Local)
 	return date.Sub(now), nil
 }
 
@@ -113,13 +166,31 @@ func Every(times ...int) *Job {
 	}
 }
 
+// Every defines when to run a job. For a recurrent jobs (n seconds/minutes/hours) you
+// should specify the unit and then call to the correspondent period method.
+func EveryRand(times ...int) *Job {
+	switch len(times) {
+	case 2:
+		r := new(recurrent)
+		r.units = times[0]
+		r.minTimes = times[0]
+		r.maxTimes = times[1]
+		return &Job{schedule: r}
+	default:
+		// Yeah... I don't like it either. But go does not support default
+		// parameters nor method overloading. In an ideal world should
+		// return an error at compile time not at runtime. :/
+		return &Job{err: errors.New("too many arguments in Every")}
+	}
+}
+
 // NotImmediately allows recurrent jobs not to be executed immediatelly after
 // definition. If a job is declared hourly won't start executing until the first hour
 // passed.
 func (j *Job) NotImmediately() *Job {
 	rj, ok := j.schedule.(*recurrent)
 	if !ok {
-		j.err = errors.New("bad function chaining")
+		j.err = errors.New("【NotImmediately】 bad function chaining")
 		return j
 	}
 	rj.done = true
@@ -143,7 +214,7 @@ func (j *Job) At(hourTime string) *Job {
 	if !ok {
 		w, ok := j.schedule.(weekly)
 		if !ok {
-			j.err = errors.New("bad function chaining")
+			j.err = errors.New("【At】 bad function chaining")
 			return j
 		}
 		w.d.setTime(hour, min, sec)
@@ -153,6 +224,92 @@ func (j *Job) At(hourTime string) *Job {
 		j.schedule = d
 	}
 	return j
+}
+
+func (j *Job) StartAt(hourTime string) *Job {
+	if j.err != nil {
+		return j
+	}
+	d, ok := j.schedule.(daily)
+	if !ok {
+		w, ok := j.schedule.(weekly)
+		if !ok {
+			j.err = errors.New("【StartAt】 bad function chaining")
+			return j
+		}
+		w.d.startTime = hourTime
+		j.schedule = w
+	} else {
+		d.startTime = hourTime
+		j.schedule = d
+	}
+	return j
+}
+
+func (j *Job) EndAt(hourTime string) *Job {
+	if j.err != nil {
+		return j
+	}
+	d, ok := j.schedule.(daily)
+	if !ok {
+		w, ok := j.schedule.(weekly)
+		if !ok {
+			j.err = errors.New("【EndAt】 bad function chaining")
+			return j
+		}
+		w.d.endTime = hourTime
+		j.schedule = w
+	} else {
+		d.endTime = hourTime
+		j.schedule = d
+	}
+	return j
+}
+
+func (j *Job) Interval(times ...int) *Job {
+	switch len(times) {
+	case 2:
+		d, ok := j.schedule.(daily)
+		if !ok {
+			w, ok := j.schedule.(weekly)
+			if !ok {
+				j.err = errors.New("【EveryRandInterval】 bad function chaining")
+				return j
+			}
+			w.d.minInterval, w.d.maxInterval = times[0], times[1]
+			j.schedule = w
+		} else {
+			d.minInterval, d.maxInterval = times[0], times[1]
+			j.schedule = d
+		}
+	default:
+		// Yeah... I don't like it either. But go does not support default
+		// parameters nor method overloading. In an ideal world should
+		// return an error at compile time not at runtime. :/
+		return &Job{err: errors.New("too many arguments in Every")}
+	}
+	return j
+}
+
+func (j *Job) Next() time.Duration {
+	d, ok := j.schedule.(daily)
+	if ok {
+		n, _ := d.nextRun()
+		return n
+	}
+
+	w, ok := j.schedule.(weekly)
+	if ok {
+		n, _ := w.nextRun()
+		return n
+	}
+
+	rj, ok := j.schedule.(*recurrent)
+	if ok {
+		n, _ := rj.nextRun()
+		return n
+	}
+	return 0
 }
 
 // Run sets the job to the schedule and returns the pointer to the job so it may be
@@ -292,6 +449,17 @@ func (j *Job) Day() *Job {
 	return j
 }
 
+// Day sets the job to run every day.
+func (j *Job) Days() *Job {
+	rj, ok := j.schedule.(*recurrent)
+	if !ok {
+		j.err = errors.New("【Day】bad function chaining 【recurrent】")
+	}
+
+	j.schedule = daily{randMinDay: rj.minTimes, randMaxDay: rj.maxTimes}
+	return j
+}
+
 func (j *Job) timeOfDay(d time.Duration) *Job {
 	if j.err != nil {
 		return j
@@ -305,6 +473,22 @@ func (j *Job) timeOfDay(d time.Duration) *Job {
 // Seconds sets the job to run every n Seconds where n was defined in the Every
 // function.
 func (j *Job) Seconds() *Job {
+	d, ok := j.schedule.(daily)
+	if !ok {
+		w, ok := j.schedule.(weekly)
+		if !ok {
+			j.err = errors.New("【Seconds】 bad function chaining")
+			return j
+		}
+		if w.d.minInterval > 0 {
+			return j
+		}
+	} else {
+		if d.minInterval > 0 {
+			return j
+		}
+	}
+
 	return j.timeOfDay(time.Second)
 }
 

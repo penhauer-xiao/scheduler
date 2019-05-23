@@ -100,7 +100,7 @@ func (d daily) nextRun() (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
-	date1 := time.Date(year, month, day, hour1, min1, sec1, 0, time.Local)
+	date1 := time.Date(year, month, day, hour1, min1, sec1, 1*100*1000*1000, time.Local)
 	if now.Before(date1) { // 现在时间还没到你设的时间，那等就是了
 		return date1.Sub(now), nil
 	}
@@ -116,7 +116,7 @@ func (d daily) nextRun() (time.Duration, error) {
 			days = int(time.Duration(randomdata.Number(d.randMinDay, d.randMaxDay)))
 		}
 
-		date2 = time.Date(year, month, day+days, hour1, min1, sec1, 0, time.Local)
+		date2 = time.Date(year, month, day+days, hour1, min1, sec1, 1*100*1000*1000, time.Local)
 		return date2.Sub(now), nil
 	}
 

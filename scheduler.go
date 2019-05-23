@@ -476,7 +476,14 @@ func (j *Job) Seconds() *Job {
 	if !ok {
 		w, ok := j.schedule.(weekly)
 		if !ok {
-			j.err = errors.New("【Seconds】 bad function chaining")
+			rj, ok := j.schedule.(*recurrent)
+			if !ok {
+				j.err = errors.New("【Seconds】 bad function chaining")
+				return j
+			}
+
+			rj.period = time.Second
+			j.schedule = rj
 			return j
 		}
 		if w.d.minInterval > 0 {
